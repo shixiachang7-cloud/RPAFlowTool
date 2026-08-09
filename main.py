@@ -1904,37 +1904,28 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage("录制模式：点击页面元素自动添加步骤")
 
     # # ===================== 上传拦截管理（用于鼠标点击方案） =====================
-    # def _install_upload_interceptor(self):
-    #     """安装文件对话框拦截器"""
-    #     try:
-    #         self.browser.page().chooseFiles.connect(self._on_choose_files)
-    #     except:
-    #         pass  # 避免重复连接
+    def _install_upload_interceptor(self):
+        try:
+            self.browser.page().chooseFiles.connect(self._on_choose_files)
+        except:
+            pass
 
-    # def _uninstall_upload_interceptor(self):
-    #     """卸载文件对话框拦截器"""
-    #     try:
-    #         self.browser.page().chooseFiles.disconnect(self._on_choose_files)
-    #     except:
-    #         pass
+    def _uninstall_upload_interceptor(self):
+        try:
+            self.browser.page().chooseFiles.disconnect(self._on_choose_files)
+        except:
+            pass
 
-    # def _on_choose_files(self, request):
-    #     """拦截文件对话框，注入上传文件路径"""
-    #     # 优先从 RunEngine 获取待上传文件
-    #     pending_file = self.run_engine.get_pending_upload_file()
-    #     if pending_file:
-    #         urls = [QUrl.fromLocalFile(pending_file)]
-    #         request.accept(urls)
-    #         self.run_engine.on_upload_dialog_handled()  # 通知引擎上传完成
-    #         self._uninstall_upload_interceptor()
-    #     else:
-    #         # 正常手动选择文件（如果用户手动点击上传）
-    #         file_path, _ = QFileDialog.getOpenFileName(self, "选择文件")
-    #         if file_path:
-    #             request.accept([QUrl.fromLocalFile(file_path)])
-    #         else:
-    #             request.reject()
-    #         self._uninstall_upload_interceptor()
+    def _on_choose_files(self, request):
+        pending_file = self.run_engine.pending_upload_file
+        if pending_file:
+            urls = [QUrl.fromLocalFile(pending_file)]
+            request.accept(urls)
+            self.run_engine._on_upload_dialog_handled(True)
+        else:
+            request.reject()
+        self._uninstall_upload_interceptor()
+        
 if __name__ == "__main__":
 
     os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = "--remote-debugging-port=9222 --ignore-certificate-errors"

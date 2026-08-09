@@ -50,6 +50,7 @@ class RunEngine(QObject):
         self.upload_check_timer = QTimer(self)
         self.upload_check_timer.timeout.connect(self._check_js_upload_result)
         self._upload_callback = None
+        self.last_desktop_target = None
 
     def _log(self, msg):
         print(msg)
@@ -72,6 +73,7 @@ class RunEngine(QObject):
         self.wait_timer.stop()
         self.upload_check_timer.stop()
         self.running = False
+        self.last_desktop_target = None
         self.stopped.emit()
 
     def _execute_next_step(self):
@@ -167,6 +169,7 @@ class RunEngine(QObject):
         self._log(f"[上传步骤{step_num}] 选择器列表: {selectors}")
 
         self._get_cdp_url(lambda ws_url: self._start_js_upload(ws_url, safe_file_path, selectors, step_num))
+        QTimer.singleShot(2000, lambda: self._fallback_upload(step, file_path))
 
     # ---------- 获取正确的 CDP URL（匹配主页面） ----------
     def _get_cdp_url(self, callback):
@@ -238,7 +241,6 @@ class RunEngine(QObject):
         self._log(f"[上传步骤{step_num}] 使用浏览器 JS 上传，CDP: {ws_url}")
 
         selectors_json = json.dumps(selectors)
-
         js_code = f"""
         (async function() {{
             window.rpa_upload_result = null;
@@ -277,7 +279,6 @@ class RunEngine(QObject):
                             let nodeId = 0;
                             let selectors = {selectors_json};
 
-                            // ===== 查找函数（主文档 + iframe 简单穿透） =====
                             async function findFileInput() {{
                                 // 先尝试 CSS 选择器
                                 for (let sel of selectors) {{
@@ -303,72 +304,37 @@ class RunEngine(QObject):
                                         }} catch(e) {{}}
                                     }}
                                 }}
-                                // 简单搜索 iframe（一层深度）
-                                let iframes = await send('DOM.querySelectorAll', {{nodeId: rootNodeId, selector: 'iframe'}});
-                                for (let iframeId of iframes.nodeIds) {{
-                                    try {{
-                                        // 获取 iframe 的 contentDocument 节点 ID（通过 DOM.resolveNode 获取对象，再请求 document）
-                                        let iframeObj = await send('DOM.resolveNode', {{nodeId: iframeId}});
-                                        // 这里简化处理：直接使用 Runtime.evaluate 在全局查找（可能跨域限制）
-                                        // 在实际测试中，如果 iframe 同源，下面的方法有效
-                                        let findInIframe = `
-                                            (function() {{
-                                                let iframe = document.querySelector('iframe');
-                                                if (iframe && iframe.contentDocument) {{
-                                                    let doc = iframe.contentDocument;
-                                                    let sel = ${{JSON.stringify(selectors)}};
-                                                    for (let s of sel) {{
-                                                        let el = s.startsWith('/') || s.startsWith('(') ?
-                                                            doc.evaluate(s, doc, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue :
-                                                            doc.querySelector(s);
-                                                        if (el && el.type === 'file') return el;
-                                                    }}
-                                                }}
-                                                return null;
-                                            }})()
-                                        `;
-                                        let iframeObj2 = await send('Runtime.evaluate', {{expression: findInIframe, returnByValue: false}});
-                                        if (iframeObj2.result && iframeObj2.result.type === 'object' && iframeObj2.result.subtype !== 'null') {{
-                                            let nodeInfo = await send('DOM.requestNode', {{objectId: iframeObj2.result.objectId}});
-                                            if (nodeInfo.nodeId) return nodeInfo.nodeId;
-                                        }}
-                                    }} catch(e) {{}}
-                                }}
-                                return 0;
-                            }}
-
-                            // 1. 第一次尝试直接查找
-                            nodeId = await findFileInput();
-
-                            // 2. 如果找不到，尝试点击触发区域（可信点击）后再查找
-                            if (!nodeId) {{
-                                // 可能的触发区域选择器
+                                // 如果找不到，尝试点击触发区域后再次查找
                                 let triggerSels = ['.n-upload-trigger', '.n-upload-dragger'];
                                 for (let tsel of triggerSels) {{
                                     let tNode = await send('DOM.querySelector', {{nodeId: rootNodeId, selector: tsel}});
                                     if (tNode.nodeId) {{
                                         let boxModel = await send('DOM.getBoxModel', {{nodeId: tNode.nodeId}});
-                                        let quad = boxModel.model.content;
-                                        if (quad.length >= 8) {{
+                                        if (boxModel && boxModel.model) {{
+                                            let quad = boxModel.model.content;
                                             let x = (quad[0] + quad[2] + quad[4] + quad[6]) / 4;
                                             let y = (quad[1] + quad[3] + quad[5] + quad[7]) / 4;
-
-                                            // 可信鼠标事件
                                             await send('Page.dispatchMouseEvent', {{type:'mousePressed', x, y, button:'left', clickCount:1}});
                                             await send('Page.dispatchMouseEvent', {{type:'mouseReleased', x, y, button:'left', clickCount:1}});
-
-                                            // 等待 Vue 生成 input
                                             await new Promise(r => setTimeout(r, 2000));
-
-                                            nodeId = await findFileInput();
-                                            if (nodeId) break;
+                                            // 再次查找
+                                            for (let sel of selectors) {{
+                                                if (!sel.startsWith('/') && !sel.startsWith('(')) {{
+                                                    try {{
+                                                        let q = await send('DOM.querySelector', {{nodeId: rootNodeId, selector: sel}});
+                                                        if (q.nodeId) return q.nodeId;
+                                                    }} catch(e) {{}}
+                                                }}
+                                            }}
                                         }}
                                     }}
                                 }}
+                                return 0;
                             }}
 
+                            nodeId = await findFileInput();
+
                             if (!nodeId) {{
-                                // 输出诊断信息
                                 let diag = await send('Runtime.evaluate', {{
                                     expression: `JSON.stringify({{inputs: document.querySelectorAll('input[type="file"]').length, iframes: document.querySelectorAll('iframe').length, url: document.location.href}})`,
                                     returnByValue: true
@@ -376,10 +342,8 @@ class RunEngine(QObject):
                                 throw new Error('未找到文件上传元素。页面状态: ' + diag.result.value);
                             }}
 
-                            // 3. 注入文件
                             await send('DOM.setFileInputFiles', {{nodeId: nodeId, files: ['{file_path}']}});
 
-                            // 4. 触发 change / input 事件
                             let cssSel = selectors.find(s => !s.startsWith('/') && !s.startsWith('(')) || 'input[type="file"]';
                             await send('Runtime.evaluate', {{
                                 expression: `(function() {{
@@ -411,6 +375,39 @@ class RunEngine(QObject):
         self._upload_callback = lambda result: self._on_js_upload_result(result, step_num)
         self.upload_check_timer.start(300)
         QTimer.singleShot(20000, self._on_js_upload_timeout)
+
+    def _on_upload_dialog_handled(self, success):
+        if not success:
+            self._log("备选上传：文件对话框未触发")
+        self.upload_timeout_timer.stop()
+        self._step_done()
+
+    def _upload_via_choosefiles(self, file_path, step):
+        from PySide6.QtTest import QTest
+        from PySide6.QtCore import Qt, QPoint
+        main_win = self.webview.window()
+        if hasattr(main_win, '_install_upload_interceptor'):
+            main_win._install_upload_interceptor()
+        # 模拟一次点击获得用户手势
+        self.webview.setFocus()
+        QTest.mouseClick(self.webview, Qt.MouseButton.LeftButton, Qt.KeyboardModifiers.NoModifier, QPoint(10, 10))
+        # 点击文件输入框
+        xpath = step.selector or 'input[type="file"]'
+        js = f"""
+        (function() {{
+            let el = document.evaluate(`{xpath}`, document, null, XPathResult.FIRST_ORDERED_NODE_TYPE, null).singleNodeValue;
+            if (!el) el = document.querySelector('input[type="file"]');
+            if (el) el.click();
+        }})();
+        """
+        self.webview.page().runJavaScript(js)
+        self.upload_timeout_timer.start(5000)
+
+    def _fallback_upload(self, step, file_path):
+        if self._upload_callback is not None:  # CDP 还在执行
+            self._upload_callback = None
+            self.upload_check_timer.stop()
+        self._upload_via_choosefiles(file_path, step)
 
     def _check_js_upload_result(self):
         self.webview.page().runJavaScript("window.rpa_upload_result", self._handle_js_result)
@@ -618,14 +615,13 @@ class RunEngine(QObject):
                 import os, shutil, glob
                 import datetime as dt
                 from send2trash import send2trash
-                from pywinauto import Desktop, pywinauto
+                from pywinauto import Desktop
                 
                 namespace = {
     'os': os, 'shutil': shutil, 'glob': glob, 'datetime': dt,
     'send2trash': send2trash,
     'window': getattr(self, 'current_desktop_window', None),
-    'desktop': Desktop(backend=self.desktop_executor.backend) if hasattr(self, 'desktop_executor') else None,
-    'pywinauto': pywinauto
+    'desktop': Desktop(backend=self.desktop_executor.backend) if hasattr(self, 'desktop_executor') else None
 }
                 exec(code, namespace)
             except Exception as e:
@@ -649,10 +645,15 @@ class RunEngine(QObject):
             from desktop_executor import DesktopExecutor
             self.desktop_executor = DesktopExecutor()
         try:
+            # 如果之前连接过窗口，且当前步骤不是窗口连接本身，先重新连接以同步窗口状态
+            if step.type != 'desktop_focus' and self.last_desktop_target:
+                self.desktop_executor.connect(target=self.last_desktop_target)
+
             if step.type == 'desktop_focus':
                 # 连接窗口，value 存储窗口标题或进程名，也可从 selector 获取额外属性
                 title = step.value.strip() if step.value else None
                 self.desktop_executor.connect(target=title)
+                self.last_desktop_target = title
             elif step.type == 'desktop_click':
                 self.desktop_executor.click(step.selector)
             elif step.type == 'desktop_input':
@@ -683,6 +684,7 @@ class RunEngine(QObject):
                 self._log(f"未知桌面步骤类型: {step.type}")
         except Exception as e:
             self._log(f"步骤 {self.current_index+1} 桌面操作错误: {str(e)}")
+            print(f"[DEBUG] 桌面步骤失败: type={step.type}, selector={step.selector}, value={step.value}, error={str(e)}")
         finally:
             self._step_done()
 

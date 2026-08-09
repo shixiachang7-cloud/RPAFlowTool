@@ -175,18 +175,33 @@ class DesktopExecutor:
         if not self.current_window:
             raise RuntimeError("请先连接窗口")
         self.current_window.set_focus()
-        # 允许全局查找，以便点击弹出菜单
         ctrl = self._get_control(selector, allow_global=True)
+
+        # 方法1：直接调用 Invoke（不移动鼠标，最可靠）
+        try:
+            ctrl.invoke()
+            print(f"控件 {selector} 已点击（Invoke）")
+            return
+        except Exception:
+            pass
+
+        # 方法2：click_input()（通常有效，少数情况会移动鼠标但不会受用户干扰）
         try:
             ctrl.click_input()
+            print(f"控件 {selector} 已点击（click_input）")
+            return
         except Exception:
-            # 备用坐标点击
-            try:
-                rect = ctrl.rectangle()
-                from pywinauto import mouse
-                mouse.click(coords=(rect.left + rect.width() // 2, rect.top + rect.height() // 2))
-            except Exception as e:
-                raise RuntimeError(f"无法点击控件: {selector}") from e
+            pass
+
+        # 方法3：绝对坐标的 SendInput 点击（完全不受物理鼠标影响）
+        try:
+            rect = ctrl.rectangle()
+            x = rect.left + rect.width() // 2
+            y = rect.top + rect.height() // 2
+            ctrl.click_input(coords=(x, y), absolute=True)
+            print(f"控件 {selector} 已点击（SendInput）")
+        except Exception as e:
+            raise RuntimeError(f"无法点击控件: {selector}") from e
 
     def input(self, selector, text):
         if not self.current_window:
