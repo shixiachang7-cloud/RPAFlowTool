@@ -7,7 +7,6 @@ from flow_step import FlowStep
 import threading
 
 
-
 class RunEngine(QObject):
     step_started = Signal(int)
     step_finished = Signal(int)
