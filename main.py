@@ -1139,7 +1139,7 @@ class MainWindow(QMainWindow):
             self.statusBar().showMessage(f"已自动加载流程：{flow_path}")
             self.btn_browse_mode.setChecked(True)
             self.pick_manager.deactivate()
-            QTimer.singleShot(800, lambda: self._run_flow(from_beginning=True))
+            # QTimer.singleShot(800, lambda: self._run_flow(from_beginning=True))
         except Exception as e:
             QMessageBox.critical(self, "自动启动失败", str(e))
 
